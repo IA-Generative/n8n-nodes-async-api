@@ -1,4 +1,10 @@
-import { ILoadOptionsFunctions, INodePropertyOptions, IDataObject } from 'n8n-workflow';
+import {
+	ILoadOptionsFunctions,
+	INodePropertyOptions,
+	IDataObject,
+	JsonObject,
+	NodeApiError,
+} from 'n8n-workflow';
 
 const CREDENTIALS_NAME = 'asyncTaskApi';
 /** Autorisation joker : le client a accès à *tous* les services. */
@@ -32,20 +38,28 @@ export async function getServices(this: ILoadOptionsFunctions): Promise<INodePro
 	const credentials = await this.getCredentials(CREDENTIALS_NAME);
 	const baseURL = normalizeBaseUrl(credentials.baseUrl as string);
 
-	const [services, me] = await Promise.all([
-		this.helpers.httpRequestWithAuthentication.call(this, CREDENTIALS_NAME, {
-			method: 'GET',
-			baseURL,
-			url: '/v1/services',
-			json: true,
-		}) as Promise<ServiceInfo[]>,
-		this.helpers.httpRequestWithAuthentication.call(this, CREDENTIALS_NAME, {
-			method: 'GET',
-			baseURL,
-			url: '/v1/me',
-			json: true,
-		}) as Promise<MeResponse>,
-	]);
+	let services: ServiceInfo[];
+	let me: MeResponse;
+	try {
+		[services, me] = await Promise.all([
+			this.helpers.httpRequestWithAuthentication.call(this, CREDENTIALS_NAME, {
+				method: 'GET',
+				baseURL,
+				url: '/v1/services',
+				json: true,
+			}) as Promise<ServiceInfo[]>,
+			this.helpers.httpRequestWithAuthentication.call(this, CREDENTIALS_NAME, {
+				method: 'GET',
+				baseURL,
+				url: '/v1/me',
+				json: true,
+			}) as Promise<MeResponse>,
+		]);
+	} catch (error) {
+		throw new NodeApiError(this.getNode(), error as unknown as JsonObject, {
+			message: 'Impossible de charger les services : API injoignable ou identifiants invalides.',
+		});
+	}
 
 	const authorized = new Set((me.authorizations ?? []).map((a) => a.service));
 	const hasAllAccess = authorized.has(ALL_SERVICES);

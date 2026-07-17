@@ -56,6 +56,26 @@ test('submit posts to the service tasks endpoint and returns the task data', asy
 	assert.deepEqual(fns.__requests[0].body, { body: { file_id: 'abc' } });
 });
 
+test('submit parses a JSON string body into an object', async () => {
+	const fns = createExecFns({
+		params: { service: 'extract-text', body: '{"file_id":"abc"}' },
+		responses: [{ status: 'success', data: { task_id: 't1', status: 'pending' } }],
+	});
+
+	await submit(fns, 0);
+
+	assert.deepEqual(fns.__requests[0].body, { body: { file_id: 'abc' } });
+});
+
+test('submit throws a clear error on malformed JSON body', async () => {
+	const fns = createExecFns({
+		params: { service: 'extract-text', body: '{not json' },
+		responses: [{ status: 'success', data: { task_id: 't1', status: 'pending' } }],
+	});
+
+	await assert.rejects(submit(fns, 0), /mal formé|invalide/i);
+});
+
 test('getTask fetches the task status endpoint and returns its data', async () => {
 	const fns = createExecFns({
 		params: { service: 'extract-text', taskId: 't1' },

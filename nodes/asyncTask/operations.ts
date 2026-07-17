@@ -69,8 +69,19 @@ async function apiRequest(
 
 /** Transforme une erreur HTTP de l'API en message lisible pour l'utilisateur n8n. */
 function toReadableError(ctx: IExecuteFunctions, error: unknown, itemIndex: number): Error {
-	const err = error as { httpCode?: string | number; response?: { body?: unknown } };
-	const body = (err.response?.body ?? {}) as { error?: { code?: string; message?: string } };
+	// n8n (client axios) expose le corps de réponse selon les versions à des endroits
+	// différents : on lit toutes les localisations connues pour retrouver `{error:{code}}`.
+	const err = error as {
+		response?: { data?: unknown; body?: unknown };
+		cause?: { response?: { data?: unknown; body?: unknown } };
+	};
+	const rawBody =
+		err.response?.data ??
+		err.response?.body ??
+		err.cause?.response?.data ??
+		err.cause?.response?.body ??
+		{};
+	const body = rawBody as { error?: { code?: string; message?: string } };
 	const code = body.error?.code;
 	const apiMessage = body.error?.message;
 
@@ -94,10 +105,32 @@ function toReadableError(ctx: IExecuteFunctions, error: unknown, itemIndex: numb
 	});
 }
 
+/**
+ * Normalise le paramètre `body` (type n8n `json`) : n8n peut renvoyer soit un
+ * objet, soit une chaîne JSON. On garantit un objet, avec message clair si le
+ * JSON est mal formé.
+ */
+function parseBodyParam(ctx: IExecuteFunctions, itemIndex: number): IDataObject {
+	const raw = ctx.getNodeParameter('body', itemIndex, {});
+	if (typeof raw !== 'string') {
+		return raw as IDataObject;
+	}
+	if (raw.trim() === '') {
+		return {};
+	}
+	try {
+		return JSON.parse(raw) as IDataObject;
+	} catch {
+		throw new NodeOperationError(ctx.getNode(), 'Body (JSON) invalide : le JSON est mal formé.', {
+			itemIndex,
+		});
+	}
+}
+
 /** Soumet une tâche et renvoie les données de création (task_id, status pending…). */
 export async function submit(ctx: IExecuteFunctions, itemIndex: number): Promise<TaskData> {
 	const service = ctx.getNodeParameter('service', itemIndex) as string;
-	const body = ctx.getNodeParameter('body', itemIndex, {}) as IDataObject;
+	const body = parseBodyParam(ctx, itemIndex);
 
 	const response = (await apiRequest(
 		ctx,
@@ -140,10 +173,18 @@ export async function submitAndWait(ctx: IExecuteFunctions, itemIndex: number): 
 		pollIntervalSeconds?: number;
 		timeoutSeconds?: number;
 	};
-	const pollIntervalMs =
-		(waitOptions.pollIntervalSeconds ?? DEFAULT_POLL_INTERVAL_SECONDS) * MILLISECONDS_PER_SECOND;
-	const timeoutMs =
-		(waitOptions.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS) * MILLISECONDS_PER_SECOND;
+	// Garde-fou : une valeur <= 0 (via expression) retomberait sinon sur un timeout
+	// immédiat / une boucle serrée. On revient au défaut si la valeur n'est pas > 0.
+	const pollSeconds =
+		Number(waitOptions.pollIntervalSeconds) > 0
+			? Number(waitOptions.pollIntervalSeconds)
+			: DEFAULT_POLL_INTERVAL_SECONDS;
+	const timeoutSeconds =
+		Number(waitOptions.timeoutSeconds) > 0
+			? Number(waitOptions.timeoutSeconds)
+			: DEFAULT_TIMEOUT_SECONDS;
+	const pollIntervalMs = pollSeconds * MILLISECONDS_PER_SECOND;
+	const timeoutMs = timeoutSeconds * MILLISECONDS_PER_SECOND;
 
 	const created = await submit(ctx, itemIndex);
 	const taskId = created.task_id;
