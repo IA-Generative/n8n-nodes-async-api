@@ -1,4 +1,5 @@
 import {
+	IDataObject,
 	IExecuteFunctions,
 	ILoadOptionsFunctions,
 	INodeExecutionData,
@@ -8,6 +9,7 @@ import {
 	NodeOperationError,
 } from 'n8n-workflow';
 import { getServices } from './services';
+import { getTask, submit, submitAndWait } from './operations';
 
 export class AsyncTask implements INodeType {
 	methods = {
@@ -85,16 +87,97 @@ export class AsyncTask implements INodeType {
 					},
 				},
 			},
+			{
+				displayName: 'Body (JSON)',
+				name: 'body',
+				type: 'json',
+				default: '{}',
+				description:
+					"Paramètres de la tâche, conformes au JSON Schema du service choisi (visible via GET /v1/services). Validé par l'API : un corps non conforme renvoie un message indiquant le champ en erreur.",
+				displayOptions: {
+					show: {
+						operation: ['submit', 'submitAndWait'],
+					},
+				},
+			},
+			{
+				displayName: 'Task ID',
+				name: 'taskId',
+				type: 'string',
+				default: '',
+				required: true,
+				description: "Identifiant de la tâche à interroger (retourné par l'opération de soumission)",
+				displayOptions: {
+					show: {
+						operation: ['get'],
+					},
+				},
+			},
+			{
+				displayName: 'Options D\'attente',
+				name: 'waitOptions',
+				type: 'collection',
+				placeholder: 'Ajouter une option',
+				default: {},
+				displayOptions: {
+					show: {
+						operation: ['submitAndWait'],
+					},
+				},
+				options: [
+					{
+						displayName: 'Fréquence De vérification (Secondes)',
+						name: 'pollIntervalSeconds',
+						type: 'number',
+						default: 5,
+						typeOptions: { minValue: 1 },
+						description: 'Intervalle entre deux vérifications du statut',
+					},
+					{
+						displayName: 'Délai Max (Secondes)',
+						name: 'timeoutSeconds',
+						type: 'number',
+						default: 300,
+						typeOptions: { minValue: 1 },
+						description: "Au-delà, le nœud s'arrête avec un message « toujours en cours »",
+					},
+				],
+			},
 		],
 	};
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
-		// Socle (#484) : les opérations sont implémentées dans les tickets suivants
-		// (#477 découverte, #478 submit, #479 get/submitAndWait, #480 fichiers).
-		const operation = this.getNodeParameter('operation', 0) as string;
-		throw new NodeOperationError(
-			this.getNode(),
-			`Opération « ${operation} » pas encore implémentée (socle en place, voir tickets #477–#480).`,
-		);
+		const items = this.getInputData();
+		const returnData: INodeExecutionData[] = [];
+
+		for (let i = 0; i < items.length; i++) {
+			const operation = this.getNodeParameter('operation', i) as string;
+			let data: IDataObject;
+			switch (operation) {
+				case 'submit':
+					data = (await submit(this, i)) as unknown as IDataObject;
+					break;
+				case 'submitAndWait':
+					data = (await submitAndWait(this, i)) as unknown as IDataObject;
+					break;
+				case 'get':
+					data = (await getTask(this, i)) as unknown as IDataObject;
+					break;
+				case 'uploadFile':
+					// #480 (fichiers) — livré dans un ticket ultérieur.
+					throw new NodeOperationError(
+						this.getNode(),
+						"L'opération « Envoyer un fichier » sera disponible dans un prochain ticket (#480).",
+						{ itemIndex: i },
+					);
+				default:
+					throw new NodeOperationError(this.getNode(), `Opération inconnue : ${operation}`, {
+						itemIndex: i,
+					});
+			}
+			returnData.push({ json: data, pairedItem: { item: i } });
+		}
+
+		return [returnData];
 	}
 }
