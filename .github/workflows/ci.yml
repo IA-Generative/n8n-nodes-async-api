@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  build-lint-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.22.1
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (tsc + icons)
+        run: pnpm build
+
+      - name: Lint (eslint-plugin-n8n-nodes-base)
+        run: pnpm lint
+
+      - name: Unit tests (node --test)
+        run: pnpm test
+
+      # Les tests d'intégration nécessitent une instance async-api joignable
+      # (ASYNC_API_URL) + les clients de test. Non exécutés dans la CI par défaut ;
+      # à lancer sur la stack locale : `pnpm test:integration`.
