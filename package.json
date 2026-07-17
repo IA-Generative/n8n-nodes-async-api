@@ -1,0 +1,64 @@
+{
+	"name": "@minint/n8n-nodes-async-api",
+	"version": "0.1.0",
+	"description": "Nœuds n8n pour les services IA BRIO (async-api) : soumission de tâches, suivi et récupération des résultats",
+	"keywords": [
+		"n8n-community-node-package",
+		"n8n",
+		"brio",
+		"async-api",
+		"minint"
+	],
+	"license": "MIT",
+	"homepage": "https://github.com/IA-Generative/n8n-nodes-async-api",
+	"author": {
+		"name": "IA-Generative"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/IA-Generative/n8n-nodes-async-api.git"
+	},
+	"engines": {
+		"node": ">=22.22.1",
+		"pnpm": ">=9.1"
+	},
+	"packageManager": "pnpm@10.32.1",
+	"main": "index.js",
+	"scripts": {
+		"preinstall": "npx only-allow pnpm",
+		"build": "tsc && gulp build:icons",
+		"build:test": "tsc -p tsconfig.json",
+		"test": "pnpm run build:test && node --test dist/tests/unit/**/*.test.js",
+		"test:integration": "pnpm run build:test && node --test dist/tests/integration/**/*.test.js",
+		"test:ci": "pnpm run build:test && node --test dist/tests/**/*.test.js",
+		"dev": "tsc --watch",
+		"format": "prettier nodes credentials package.json --write",
+		"lint": "eslint nodes credentials package.json",
+		"lintfix": "eslint nodes credentials package.json --fix"
+	},
+	"files": [
+		"dist"
+	],
+	"n8n": {
+		"n8nNodesApiVersion": 1,
+		"credentials": [
+			"dist/credentials/AsyncTaskApi.credentials.js"
+		],
+		"nodes": [
+			"dist/nodes/asyncTask/AsyncTask.node.js"
+		]
+	},
+	"devDependencies": {
+		"@types/node": "^22.10.1",
+		"@typescript-eslint/parser": "^7.15.0",
+		"eslint": "^8.56.0",
+		"eslint-plugin-n8n-nodes-base": "^1.16.1",
+		"gulp": "^4.0.2",
+		"n8n-workflow": "*",
+		"prettier": "^3.3.2",
+		"typescript": "^5.5.3"
+	},
+	"peerDependencies": {
+		"n8n-workflow": "*"
+	}
+}

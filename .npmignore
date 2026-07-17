@@ -1,0 +1,20 @@
+# Development files
+.DS_Store
+*.tsbuildinfo
+node_modules/
+tests/
+.git/
+.github/
+.vscode/
+.idea/
+*.log
+.eslintrc*
+.prettierrc*
+.editorconfig
+.gitignore
+gulpfile.js
+tsconfig.json
+docker-compose.yml
+
+# Don't ignore these files
+!dist/
