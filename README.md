@@ -1,4 +1,4 @@
-# @minint/n8n-nodes-async-api
+# n8n-nodes-async-api
 
 Nœuds [n8n](https://n8n.io) pour les services IA **BRIO** (`async-api`) : soumettre des tâches
 à un service, suivre leur avancement et récupérer les résultats, directement depuis un workflow n8n.
