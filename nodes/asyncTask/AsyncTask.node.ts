@@ -9,7 +9,14 @@ import {
 	NodeOperationError,
 } from 'n8n-workflow';
 import { getServices } from './services';
-import { getTask, submit, submitAndWait } from './operations';
+import {
+	getTask,
+	presignedDownload,
+	presignedUpload,
+	submit,
+	submitAndWait,
+	uploadFile,
+} from './operations';
 
 export class AsyncTask implements INodeType {
 	methods = {
@@ -52,6 +59,11 @@ export class AsyncTask implements INodeType {
 						action: 'Envoyer un fichier et recuperer un file id',
 					},
 					{
+						name: 'Envoyer Un Gros Fichier',
+						value: 'presignedUpload',
+						action: 'Envoyer un gros fichier via presigned upload',
+					},
+					{
 						name: 'Recuperer Une Tache',
 						value: 'get',
 						action: 'Recuperer letat ou le resultat dune tache',
@@ -65,6 +77,11 @@ export class AsyncTask implements INodeType {
 						name: 'Soumettre Une Tache',
 						value: 'submit',
 						action: 'Soumettre une tache et recuperer son identifiant',
+					},
+					{
+						name: 'Telecharger Un Fichier Resultat',
+						value: 'presignedDownload',
+						action: 'Telecharger un fichier resultat via presigned download',
 					},
 				],
 				default: 'submitAndWait',
@@ -110,6 +127,33 @@ export class AsyncTask implements INodeType {
 				displayOptions: {
 					show: {
 						operation: ['get'],
+					},
+				},
+			},
+			{
+				displayName: 'Propriété Binaire',
+				name: 'binaryPropertyName',
+				type: 'string',
+				default: 'data',
+				required: true,
+				description:
+					"Nom de la propriété binaire d'entrée contenant le fichier (upload) ou de sortie où écrire le fichier (téléchargement)",
+				displayOptions: {
+					show: {
+						operation: ['uploadFile', 'presignedUpload', 'presignedDownload'],
+					},
+				},
+			},
+			{
+				displayName: 'File ID',
+				name: 'fileId',
+				type: 'string',
+				default: '',
+				required: true,
+				description: 'Identifiant du fichier à télécharger (format {client_id}/{uuid}/{filename})',
+				displayOptions: {
+					show: {
+						operation: ['presignedDownload'],
 					},
 				},
 			},
@@ -164,12 +208,17 @@ export class AsyncTask implements INodeType {
 					data = (await getTask(this, i)) as unknown as IDataObject;
 					break;
 				case 'uploadFile':
-					// #480 (fichiers) — livré dans un ticket ultérieur.
-					throw new NodeOperationError(
-						this.getNode(),
-						"L'opération « Envoyer un fichier » sera disponible dans un prochain ticket (#480).",
-						{ itemIndex: i },
-					);
+					data = await uploadFile(this, i);
+					break;
+				case 'presignedUpload':
+					data = await presignedUpload(this, i);
+					break;
+				case 'presignedDownload': {
+					// Renvoie un item binaire (le fichier téléchargé), pas seulement du JSON.
+					const downloaded = await presignedDownload(this, i);
+					returnData.push({ ...downloaded, pairedItem: { item: i } });
+					continue;
+				}
 				default:
 					throw new NodeOperationError(this.getNode(), `Opération inconnue : ${operation}`, {
 						itemIndex: i,

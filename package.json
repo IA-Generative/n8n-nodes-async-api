@@ -1,6 +1,6 @@
 {
 	"name": "n8n-nodes-async-api",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Nœuds n8n pour les services IA BRIO (async-api) : soumission de tâches, suivi et récupération des résultats",
 	"keywords": [
 		"n8n-community-node-package",

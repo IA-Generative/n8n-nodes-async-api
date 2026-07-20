@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getTask, submit, submitAndWait } from '../../nodes/asyncTask/operations';
+import {
+	getTask,
+	presignedDownload,
+	presignedUpload,
+	submit,
+	submitAndWait,
+	uploadFile,
+} from '../../nodes/asyncTask/operations';
 
 const NODE = {
 	name: 'AsyncTask',
@@ -147,4 +154,101 @@ test('API errors are remapped to a readable message (SERVICE_FORBIDDEN)', async 
 	});
 
 	await assert.rejects(submit(fns, 0), /autoris/i);
+});
+
+// ---- Fichiers (#480) ----
+
+function createFileExecFns(params: Record<string, unknown>, opts: {
+	buffer?: Buffer;
+	binaryMeta?: { fileName: string; mimeType: string };
+	authResponses?: Record<string, unknown>;
+	httpResponse?: unknown;
+}) {
+	const authCalls: Array<{ url: string; body?: unknown }> = [];
+	const httpCalls: Array<{ url: string; method?: string; body?: unknown }> = [];
+	const fns = {
+		getNode: () => NODE,
+		getNodeParameter: (name: string, _i: number, fallback?: unknown) =>
+			name in params ? params[name] : fallback,
+		async getCredentials() {
+			return { baseUrl: 'http://api', clientId: 'c', clientSecret: 's' };
+		},
+		helpers: {
+			assertBinaryData: (_i: number, _p: string) =>
+				opts.binaryMeta ?? { fileName: 'doc.pdf', mimeType: 'application/pdf' },
+			getBinaryDataBuffer: async (_i: number, _p: string) => opts.buffer ?? Buffer.from('data'),
+			async httpRequestWithAuthentication(_cred: string, o: { url: string; body?: unknown }) {
+				authCalls.push({ url: o.url, body: o.body });
+				return (opts.authResponses ?? {})[o.url];
+			},
+			async httpRequest(o: { url: string; method?: string; body?: unknown }) {
+				httpCalls.push({ url: o.url, method: o.method, body: o.body });
+				return opts.httpResponse;
+			},
+			prepareBinaryData: async (buffer: Buffer, fileName: string) => ({
+				fileName,
+				data: buffer.toString('base64'),
+				mimeType: 'application/octet-stream',
+			}),
+		},
+		__authCalls: authCalls,
+		__httpCalls: httpCalls,
+	};
+	return fns as any;
+}
+
+test('uploadFile posts multipart to /storage/upload and returns file_id', async () => {
+	const fns = createFileExecFns(
+		{ binaryPropertyName: 'data' },
+		{ authResponses: { '/storage/upload': { file_id: 'c/uuid/doc.pdf' } } },
+	);
+
+	const res = await uploadFile(fns, 0);
+
+	assert.equal(res.file_id, 'c/uuid/doc.pdf');
+	assert.equal(fns.__authCalls[0].url, '/storage/upload');
+	// le body est un FormData contenant le champ "file"
+	assert.ok((fns.__authCalls[0].body as FormData).get('file'));
+});
+
+test('presignedUpload requests a presigned POST then uploads to S3, returns file_id', async () => {
+	const fns = createFileExecFns(
+		{ binaryPropertyName: 'data' },
+		{
+			authResponses: {
+				'/storage/presigned-upload': {
+					url: 'https://s3.example/bucket',
+					fields: { key: 'c/uuid/doc.pdf', policy: 'xxx' },
+					file_id: 'c/uuid/doc.pdf',
+				},
+			},
+		},
+	);
+
+	const res = await presignedUpload(fns, 0);
+
+	assert.equal(res.file_id, 'c/uuid/doc.pdf');
+	assert.equal(fns.__authCalls[0].url, '/storage/presigned-upload');
+	// upload direct S3 via httpRequest (sans auth)
+	assert.equal(fns.__httpCalls[0].url, 'https://s3.example/bucket');
+	const s3Body = fns.__httpCalls[0].body as FormData;
+	assert.ok(s3Body.get('file'));
+	assert.equal(s3Body.get('key'), 'c/uuid/doc.pdf');
+});
+
+test('presignedDownload fetches the presigned URL and returns binary', async () => {
+	const fns = createFileExecFns(
+		{ fileId: 'c/uuid/result.pdf', binaryPropertyName: 'data' },
+		{
+			authResponses: { '/storage/presigned-download': { url: 'https://s3.example/get' } },
+			httpResponse: { body: Buffer.from('PDFDATA') },
+		},
+	);
+
+	const item = await presignedDownload(fns, 0);
+
+	assert.equal(item.json.file_id, 'c/uuid/result.pdf');
+	assert.ok(item.binary?.data);
+	assert.equal(item.binary?.data.fileName, 'result.pdf');
+	assert.equal(fns.__httpCalls[0].url, 'https://s3.example/get');
 });

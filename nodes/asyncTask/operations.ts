@@ -2,11 +2,13 @@ import {
 	IExecuteFunctions,
 	IDataObject,
 	IHttpRequestMethods,
+	INodeExecutionData,
 	JsonObject,
 	NodeApiError,
 	NodeOperationError,
 	sleep,
 } from 'n8n-workflow';
+import { Blob } from 'node:buffer';
 
 const CREDENTIALS_NAME = 'asyncTaskApi';
 
@@ -224,4 +226,129 @@ export async function submitAndWait(ctx: IExecuteFunctions, itemIndex: number): 
 	throw new NodeOperationError(ctx.getNode(), `Statut de tâche inattendu : ${current.status}`, {
 		itemIndex,
 	});
+}
+
+// --------------------------------------------------------------------------
+// Fichiers (#480) — /storage/upload, presigned upload (gros scans), download
+// --------------------------------------------------------------------------
+
+const DEFAULT_BINARY_PROPERTY = 'data';
+const DEFAULT_MIME_TYPE = 'application/octet-stream';
+
+interface PresignedUploadResponse {
+	url: string;
+	fields: IDataObject;
+	file_id: string;
+}
+
+interface PresignedDownloadResponse {
+	url: string;
+	expires_in_seconds?: number;
+}
+
+/** Lit le binaire d'entrée du nœud (nom de propriété, buffer, filename, mime). */
+async function readInputBinary(
+	ctx: IExecuteFunctions,
+	itemIndex: number,
+): Promise<{ buffer: Buffer; filename: string; mimeType: string }> {
+	const binaryProperty = ctx.getNodeParameter(
+		'binaryPropertyName',
+		itemIndex,
+		DEFAULT_BINARY_PROPERTY,
+	) as string;
+	const binary = ctx.helpers.assertBinaryData(itemIndex, binaryProperty);
+	const buffer = await ctx.helpers.getBinaryDataBuffer(itemIndex, binaryProperty);
+	return {
+		buffer,
+		filename: binary.fileName || 'upload',
+		mimeType: binary.mimeType || DEFAULT_MIME_TYPE,
+	};
+}
+
+/** Envoie un fichier (petit) à `POST /storage/upload` (multipart) → `{file_id}`. */
+export async function uploadFile(ctx: IExecuteFunctions, itemIndex: number): Promise<IDataObject> {
+	const { buffer, filename, mimeType } = await readInputBinary(ctx, itemIndex);
+	const credentials = await ctx.getCredentials(CREDENTIALS_NAME);
+	const baseURL = normalizeBaseUrl(credentials.baseUrl as string);
+
+	const formData = new FormData();
+	formData.append('file', new Blob([buffer], { type: mimeType }), filename);
+
+	try {
+		return (await ctx.helpers.httpRequestWithAuthentication.call(ctx, CREDENTIALS_NAME, {
+			method: 'POST',
+			baseURL,
+			url: '/storage/upload',
+			body: formData,
+		})) as IDataObject;
+	} catch (error) {
+		throw toReadableError(ctx, error, itemIndex);
+	}
+}
+
+/**
+ * Gros scans : `POST /storage/presigned-upload` (obtenir url + fields) puis upload
+ * **direct vers S3** (multipart), renvoie `{file_id}`.
+ */
+export async function presignedUpload(
+	ctx: IExecuteFunctions,
+	itemIndex: number,
+): Promise<IDataObject> {
+	const { buffer, filename, mimeType } = await readInputBinary(ctx, itemIndex);
+
+	const presign = (await apiRequest(ctx, itemIndex, 'POST', '/storage/presigned-upload', {
+		filename,
+		mime_type: mimeType,
+	})) as unknown as PresignedUploadResponse;
+
+	const formData = new FormData();
+	for (const [key, value] of Object.entries(presign.fields ?? {})) {
+		formData.append(key, String(value));
+	}
+	formData.append('file', new Blob([buffer], { type: mimeType }), filename);
+
+	try {
+		// POST direct vers S3 : pas d'auth Basic (l'autorisation est dans `fields`).
+		await ctx.helpers.httpRequest({ method: 'POST', url: presign.url, body: formData });
+	} catch (error) {
+		throw new NodeOperationError(
+			ctx.getNode(),
+			"Échec de l'upload direct vers le stockage (fichier trop gros ou presigned expirée ?).",
+			{ itemIndex, description: (error as Error)?.message },
+		);
+	}
+	return { file_id: presign.file_id };
+}
+
+/**
+ * Récupère un fichier résultat : `POST /storage/presigned-download` puis GET de la
+ * presigned URL → renvoie le contenu en **binaire** n8n.
+ */
+export async function presignedDownload(
+	ctx: IExecuteFunctions,
+	itemIndex: number,
+): Promise<INodeExecutionData> {
+	const fileId = ctx.getNodeParameter('fileId', itemIndex) as string;
+	const binaryProperty = ctx.getNodeParameter(
+		'binaryPropertyName',
+		itemIndex,
+		DEFAULT_BINARY_PROPERTY,
+	) as string;
+
+	const presign = (await apiRequest(ctx, itemIndex, 'POST', '/storage/presigned-download', {
+		file_id: fileId,
+	})) as unknown as PresignedDownloadResponse;
+
+	const response = (await ctx.helpers.httpRequest({
+		method: 'GET',
+		url: presign.url,
+		encoding: 'arraybuffer',
+		returnFullResponse: true,
+	})) as { body: ArrayBuffer };
+
+	const buffer = Buffer.from(response.body);
+	const fileName = fileId.split('/').pop() || 'download';
+	const binaryData = await ctx.helpers.prepareBinaryData(buffer, fileName);
+
+	return { json: { file_id: fileId }, binary: { [binaryProperty]: binaryData } };
 }
