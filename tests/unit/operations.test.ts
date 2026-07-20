@@ -178,7 +178,9 @@ function createFileExecFns(params: Record<string, unknown>, opts: {
 			getBinaryDataBuffer: async (_i: number, _p: string) => opts.buffer ?? Buffer.from('data'),
 			async httpRequestWithAuthentication(_cred: string, o: { url: string; body?: unknown }) {
 				authCalls.push({ url: o.url, body: o.body });
-				return (opts.authResponses ?? {})[o.url];
+				const r = (opts.authResponses ?? {})[o.url];
+				if (r instanceof Error) throw r;
+				return r;
 			},
 			async httpRequest(o: { url: string; method?: string; body?: unknown }) {
 				httpCalls.push({ url: o.url, method: o.method, body: o.body });
@@ -239,6 +241,33 @@ test('uploadFile routes a >25MB file to presigned upload (mode presigned, S3 POS
 	const s3Body = fns.__httpCalls[0].body as FormData;
 	assert.equal(s3Body.get('key'), 'c/uuid/doc.pdf'); // fields avant file
 	assert.ok(s3Body.get('file'));
+});
+
+test('uploadFile falls back to presigned when direct upload is rejected for size', async () => {
+	const sizeError = Object.assign(new Error('Part exceeded maximum size of 1024KB.'), {
+		httpCode: '400',
+	});
+	const fns = createFileExecFns(
+		{ binaryPropertyName: 'data' },
+		{
+			buffer: Buffer.from('smallish but API limit lower'),
+			authResponses: {
+				'/storage/upload': sizeError,
+				'/storage/presigned-upload': {
+					url: 'https://s3.example/bucket',
+					fields: { key: 'c/uuid/doc.pdf' },
+					file_id: 'c/uuid/doc.pdf',
+				},
+			},
+		},
+	);
+
+	const res = await uploadFile(fns, 0);
+
+	assert.equal(res.upload_mode, 'presigned');
+	assert.equal(res.file_id, 'c/uuid/doc.pdf');
+	assert.equal(fns.__authCalls[0].url, '/storage/upload'); // tenté en direct d'abord
+	assert.equal(fns.__authCalls[1].url, '/storage/presigned-upload'); // puis repli
 });
 
 test('presignedDownload fetches the presigned URL and returns binary', async () => {

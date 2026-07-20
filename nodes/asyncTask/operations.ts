@@ -275,7 +275,6 @@ const DIRECT_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 /** Upload direct (petits fichiers) : `POST /storage/upload` (multipart) → `{file_id}`. */
 async function directUpload(
 	ctx: IExecuteFunctions,
-	itemIndex: number,
 	buffer: Buffer,
 	filename: string,
 	mimeType: string,
@@ -286,17 +285,27 @@ async function directUpload(
 	const formData = new FormData();
 	formData.append('file', new Blob([buffer], { type: mimeType }), filename);
 
-	try {
-		const res = (await ctx.helpers.httpRequestWithAuthentication.call(ctx, CREDENTIALS_NAME, {
-			method: 'POST',
-			baseURL,
-			url: '/storage/upload',
-			body: formData,
-		})) as IDataObject;
-		return { ...res, upload_mode: 'direct' };
-	} catch (error) {
-		throw toReadableError(ctx, error, itemIndex);
+	const res = (await ctx.helpers.httpRequestWithAuthentication.call(ctx, CREDENTIALS_NAME, {
+		method: 'POST',
+		baseURL,
+		url: '/storage/upload',
+		body: formData,
+	})) as IDataObject;
+	return { ...res, upload_mode: 'direct' };
+}
+
+/** Détecte une erreur d'upload liée à la taille (→ repli automatique sur presigned). */
+function isSizeLimitError(error: unknown): boolean {
+	const err = error as {
+		httpCode?: string | number;
+		response?: { data?: unknown; body?: unknown };
+		message?: string;
+	};
+	if (String(err.httpCode ?? '') === '413') {
+		return true;
 	}
+	const haystack = `${JSON.stringify(err.response?.data ?? err.response?.body ?? '')}${err.message ?? ''}`;
+	return /exceeded maximum size|entity too large|TEXT_TOO_LARGE|too large/i.test(haystack);
 }
 
 /**
@@ -343,10 +352,19 @@ async function presignedUploadFlow(
  */
 export async function uploadFile(ctx: IExecuteFunctions, itemIndex: number): Promise<IDataObject> {
 	const { buffer, filename, mimeType } = await readInputBinary(ctx, itemIndex);
-	if (buffer.length <= DIRECT_UPLOAD_MAX_BYTES) {
-		return directUpload(ctx, itemIndex, buffer, filename, mimeType);
+	if (buffer.length > DIRECT_UPLOAD_MAX_BYTES) {
+		return presignedUploadFlow(ctx, itemIndex, buffer, filename, mimeType);
 	}
-	return presignedUploadFlow(ctx, itemIndex, buffer, filename, mimeType);
+	try {
+		return await directUpload(ctx, buffer, filename, mimeType);
+	} catch (error) {
+		// Repli auto : si l'API rejette pour cause de taille (limite plus basse que le seuil),
+		// on bascule sur l'upload direct S3 via presigned au lieu d'un message cryptique.
+		if (isSizeLimitError(error)) {
+			return presignedUploadFlow(ctx, itemIndex, buffer, filename, mimeType);
+		}
+		throw toReadableError(ctx, error, itemIndex);
+	}
 }
 
 /**
@@ -373,7 +391,7 @@ export async function presignedDownload(
 		url: presign.url,
 		encoding: 'arraybuffer',
 		returnFullResponse: true,
-	})) as { body: ArrayBuffer };
+	})) as { body: Buffer };
 
 	const buffer = Buffer.from(response.body);
 	const fileName = fileId.split('/').pop() || 'download';
