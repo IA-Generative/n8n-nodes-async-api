@@ -9,14 +9,7 @@ import {
 	NodeOperationError,
 } from 'n8n-workflow';
 import { getServices } from './services';
-import {
-	getTask,
-	presignedDownload,
-	presignedUpload,
-	submit,
-	submitAndWait,
-	uploadFile,
-} from './operations';
+import { getTask, presignedDownload, submit, submitAndWait, uploadFile } from './operations';
 
 export class AsyncTask implements INodeType {
 	methods = {
@@ -56,12 +49,7 @@ export class AsyncTask implements INodeType {
 					{
 						name: 'Envoyer Un Fichier',
 						value: 'uploadFile',
-						action: 'Envoyer un fichier et recuperer un file id',
-					},
-					{
-						name: 'Envoyer Un Gros Fichier',
-						value: 'presignedUpload',
-						action: 'Envoyer un gros fichier via presigned upload',
+						action: 'Envoyer un fichier mode auto selon la taille',
 					},
 					{
 						name: 'Recuperer Une Tache',
@@ -140,7 +128,7 @@ export class AsyncTask implements INodeType {
 					"Nom de la propriété binaire d'entrée contenant le fichier (upload) ou de sortie où écrire le fichier (téléchargement)",
 				displayOptions: {
 					show: {
-						operation: ['uploadFile', 'presignedUpload', 'presignedDownload'],
+						operation: ['uploadFile', 'presignedDownload'],
 					},
 				},
 			},
@@ -209,9 +197,6 @@ export class AsyncTask implements INodeType {
 					break;
 				case 'uploadFile':
 					data = await uploadFile(this, i);
-					break;
-				case 'presignedUpload':
-					data = await presignedUpload(this, i);
 					break;
 				case 'presignedDownload': {
 					// Renvoie un item binaire (le fichier téléchargé), pas seulement du JSON.

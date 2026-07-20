@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {
 	getTask,
 	presignedDownload,
-	presignedUpload,
 	submit,
 	submitAndWait,
 	uploadFile,
@@ -197,24 +196,30 @@ function createFileExecFns(params: Record<string, unknown>, opts: {
 	return fns as any;
 }
 
-test('uploadFile posts multipart to /storage/upload and returns file_id', async () => {
+test('uploadFile routes a small file to direct /storage/upload (mode direct)', async () => {
 	const fns = createFileExecFns(
 		{ binaryPropertyName: 'data' },
-		{ authResponses: { '/storage/upload': { file_id: 'c/uuid/doc.pdf' } } },
+		{
+			buffer: Buffer.from('small'),
+			authResponses: { '/storage/upload': { file_id: 'c/uuid/doc.pdf' } },
+		},
 	);
 
 	const res = await uploadFile(fns, 0);
 
 	assert.equal(res.file_id, 'c/uuid/doc.pdf');
+	assert.equal(res.upload_mode, 'direct');
 	assert.equal(fns.__authCalls[0].url, '/storage/upload');
-	// le body est un FormData contenant le champ "file"
 	assert.ok((fns.__authCalls[0].body as FormData).get('file'));
+	assert.equal(fns.__httpCalls.length, 0); // pas de POST S3 direct
 });
 
-test('presignedUpload requests a presigned POST then uploads to S3, returns file_id', async () => {
+test('uploadFile routes a >25MB file to presigned upload (mode presigned, S3 POST)', async () => {
+	const bigBuffer = Buffer.alloc(26 * 1024 * 1024, 1); // 26 MB > seuil 25 MB
 	const fns = createFileExecFns(
 		{ binaryPropertyName: 'data' },
 		{
+			buffer: bigBuffer,
 			authResponses: {
 				'/storage/presigned-upload': {
 					url: 'https://s3.example/bucket',
@@ -225,15 +230,15 @@ test('presignedUpload requests a presigned POST then uploads to S3, returns file
 		},
 	);
 
-	const res = await presignedUpload(fns, 0);
+	const res = await uploadFile(fns, 0);
 
 	assert.equal(res.file_id, 'c/uuid/doc.pdf');
+	assert.equal(res.upload_mode, 'presigned');
 	assert.equal(fns.__authCalls[0].url, '/storage/presigned-upload');
-	// upload direct S3 via httpRequest (sans auth)
-	assert.equal(fns.__httpCalls[0].url, 'https://s3.example/bucket');
+	assert.equal(fns.__httpCalls[0].url, 'https://s3.example/bucket'); // upload direct S3
 	const s3Body = fns.__httpCalls[0].body as FormData;
+	assert.equal(s3Body.get('key'), 'c/uuid/doc.pdf'); // fields avant file
 	assert.ok(s3Body.get('file'));
-	assert.equal(s3Body.get('key'), 'c/uuid/doc.pdf');
 });
 
 test('presignedDownload fetches the presigned URL and returns binary', async () => {

@@ -265,9 +265,21 @@ async function readInputBinary(
 	};
 }
 
-/** Envoie un fichier (petit) à `POST /storage/upload` (multipart) → `{file_id}`. */
-export async function uploadFile(ctx: IExecuteFunctions, itemIndex: number): Promise<IDataObject> {
-	const { buffer, filename, mimeType } = await readInputBinary(ctx, itemIndex);
+/**
+ * Seuil (octets) au-delà duquel on bascule sur la presigned URL. Aligné sur la limite
+ * `nginx.ingress…/proxy-body-size: 25m` : au-delà, un upload transitant par l'API/ingress
+ * est rejeté → il faut l'upload direct S3 via presigned.
+ */
+const DIRECT_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
+
+/** Upload direct (petits fichiers) : `POST /storage/upload` (multipart) → `{file_id}`. */
+async function directUpload(
+	ctx: IExecuteFunctions,
+	itemIndex: number,
+	buffer: Buffer,
+	filename: string,
+	mimeType: string,
+): Promise<IDataObject> {
 	const credentials = await ctx.getCredentials(CREDENTIALS_NAME);
 	const baseURL = normalizeBaseUrl(credentials.baseUrl as string);
 
@@ -275,33 +287,36 @@ export async function uploadFile(ctx: IExecuteFunctions, itemIndex: number): Pro
 	formData.append('file', new Blob([buffer], { type: mimeType }), filename);
 
 	try {
-		return (await ctx.helpers.httpRequestWithAuthentication.call(ctx, CREDENTIALS_NAME, {
+		const res = (await ctx.helpers.httpRequestWithAuthentication.call(ctx, CREDENTIALS_NAME, {
 			method: 'POST',
 			baseURL,
 			url: '/storage/upload',
 			body: formData,
 		})) as IDataObject;
+		return { ...res, upload_mode: 'direct' };
 	} catch (error) {
 		throw toReadableError(ctx, error, itemIndex);
 	}
 }
 
 /**
- * Gros scans : `POST /storage/presigned-upload` (obtenir url + fields) puis upload
- * **direct vers S3** (multipart), renvoie `{file_id}`.
+ * Gros fichiers : `POST /storage/presigned-upload` (url + fields) puis upload **direct
+ * vers S3** (multipart), renvoie `{file_id}`.
  */
-export async function presignedUpload(
+async function presignedUploadFlow(
 	ctx: IExecuteFunctions,
 	itemIndex: number,
+	buffer: Buffer,
+	filename: string,
+	mimeType: string,
 ): Promise<IDataObject> {
-	const { buffer, filename, mimeType } = await readInputBinary(ctx, itemIndex);
-
 	const presign = (await apiRequest(ctx, itemIndex, 'POST', '/storage/presigned-upload', {
 		filename,
 		mime_type: mimeType,
 	})) as unknown as PresignedUploadResponse;
 
 	const formData = new FormData();
+	// Les `fields` de la policy S3 doivent précéder le champ `file`.
 	for (const [key, value] of Object.entries(presign.fields ?? {})) {
 		formData.append(key, String(value));
 	}
@@ -313,11 +328,25 @@ export async function presignedUpload(
 	} catch (error) {
 		throw new NodeOperationError(
 			ctx.getNode(),
-			"Échec de l'upload direct vers le stockage (fichier trop gros ou presigned expirée ?).",
+			"Échec de l'upload direct vers le stockage (presigned expirée ou fichier trop gros ?).",
 			{ itemIndex, description: (error as Error)?.message },
 		);
 	}
-	return { file_id: presign.file_id };
+	return { file_id: presign.file_id, upload_mode: 'presigned' };
+}
+
+/**
+ * Envoie un fichier en **choisissant automatiquement le mode selon la taille** :
+ * ≤ 25 MB → upload direct via l'API (`/storage/upload`) ; > 25 MB → presigned URL
+ * (upload direct S3, contourne la limite `proxy-body-size` de l'ingress).
+ * Renvoie `{file_id, upload_mode}`.
+ */
+export async function uploadFile(ctx: IExecuteFunctions, itemIndex: number): Promise<IDataObject> {
+	const { buffer, filename, mimeType } = await readInputBinary(ctx, itemIndex);
+	if (buffer.length <= DIRECT_UPLOAD_MAX_BYTES) {
+		return directUpload(ctx, itemIndex, buffer, filename, mimeType);
+	}
+	return presignedUploadFlow(ctx, itemIndex, buffer, filename, mimeType);
 }
 
 /**
