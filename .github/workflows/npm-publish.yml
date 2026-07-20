@@ -25,6 +25,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Activation de corepack et pnpm
         run: |
@@ -52,6 +53,8 @@ jobs:
 
       - name: Publication sur npm
         run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Création de la GitHub Release
         uses: softprops/action-gh-release@v2
