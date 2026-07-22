@@ -22,6 +22,15 @@ const DEFAULT_POLL_INTERVAL_SECONDS = 5;
 const DEFAULT_TIMEOUT_SECONDS = 300;
 const MILLISECONDS_PER_SECOND = 1000;
 
+/**
+ * Codes HTTP transitoires pendant le polling : un aléa côté infra (gateway,
+ * dépendance LLM qui renvoie 5xx le temps d'un retry worker…) ne doit PAS faire
+ * échouer une tâche qui, elle, finit en succès. On retente le poll au lieu de jeter.
+ */
+const TRANSIENT_POLL_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+/** Échecs de poll CONSÉCUTIFS tolérés avant d'abandonner (un succès remet à zéro). */
+const MAX_CONSECUTIVE_POLL_FAILURES = 5;
+
 interface TaskData {
 	task_id: string;
 	status: string;
@@ -164,6 +173,64 @@ function isTerminal(status: string): boolean {
 	return (TERMINAL_STATUSES as readonly string[]).includes(status);
 }
 
+/** Extrait le code HTTP d'une erreur (axios/n8n), quelle que soit sa forme. */
+function httpStatusFromError(error: unknown): number | undefined {
+	const e = error as {
+		httpCode?: string | number;
+		statusCode?: number;
+		status?: number;
+		response?: { status?: number; statusCode?: number };
+		cause?: { response?: { status?: number; statusCode?: number }; statusCode?: number };
+	};
+	const raw =
+		e.response?.status ??
+		e.response?.statusCode ??
+		e.statusCode ??
+		e.status ??
+		e.cause?.response?.status ??
+		e.cause?.response?.statusCode ??
+		e.cause?.statusCode;
+	if (typeof raw === 'number') {
+		return raw;
+	}
+	const parsed = Number(e.httpCode);
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * Une erreur de poll est-elle transitoire (à retenter) plutôt que définitive ?
+ * - 5xx / 408 / 429 → transitoire.
+ * - pas de code exploitable (timeout/réseau) → transitoire.
+ * - 4xx (401/403/404…) → définitive, on remonte l'erreur.
+ */
+function isTransientPollError(error: unknown): boolean {
+	const status = httpStatusFromError(error);
+	if (status === undefined) {
+		return true;
+	}
+	return TRANSIENT_POLL_HTTP_STATUSES.has(status);
+}
+
+/**
+ * Un poll : GET du statut de la tâche. Laisse remonter l'erreur BRUTE (sans la
+ * remapper) pour que l'appelant puisse décider transitoire vs définitive.
+ */
+async function requestTaskStatus(
+	ctx: IExecuteFunctions,
+	service: string,
+	taskId: string,
+): Promise<TaskData> {
+	const credentials = await ctx.getCredentials(CREDENTIALS_NAME);
+	const baseURL = normalizeBaseUrl(credentials.baseUrl as string);
+	const response = (await ctx.helpers.httpRequestWithAuthentication.call(ctx, CREDENTIALS_NAME, {
+		method: 'GET',
+		baseURL,
+		url: `/v1/services/${encodeURIComponent(service)}/tasks/${encodeURIComponent(taskId)}`,
+		json: true,
+	})) as unknown as TaskResponse;
+	return response.data;
+}
+
 /**
  * Soumet une tâche puis attend jusqu'à un statut terminal (success/failure),
  * en bornant par un timeout. Renvoie le résultat en cas de succès ; lève une
@@ -193,6 +260,7 @@ export async function submitAndWait(ctx: IExecuteFunctions, itemIndex: number): 
 
 	let elapsed = 0;
 	let current = created;
+	let consecutivePollFailures = 0;
 	while (!isTerminal(current.status)) {
 		if (elapsed >= timeoutMs) {
 			throw new NodeOperationError(
@@ -203,13 +271,29 @@ export async function submitAndWait(ctx: IExecuteFunctions, itemIndex: number): 
 		}
 		await sleep(pollIntervalMs);
 		elapsed += pollIntervalMs;
-		const response = (await apiRequest(
-			ctx,
-			itemIndex,
-			'GET',
-			`/v1/services/${encodeURIComponent(service)}/tasks/${encodeURIComponent(taskId)}`,
-		)) as unknown as TaskResponse;
-		current = response.data;
+		try {
+			current = await requestTaskStatus(ctx, service, taskId);
+			consecutivePollFailures = 0;
+		} catch (error) {
+			// Erreur définitive (4xx) : la tâche/route est vraiment en faute → on remonte.
+			if (!isTransientPollError(error)) {
+				throw toReadableError(ctx, error, itemIndex);
+			}
+			// Erreur transitoire (5xx/réseau) : on retente au prochain tour tant que ça
+			// ne se répète pas trop. Un poll réussi remet le compteur à zéro, donc des
+			// 500 intermittents n'échouent jamais une tâche qui finit en succès.
+			consecutivePollFailures += 1;
+			if (consecutivePollFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
+				throw new NodeOperationError(
+					ctx.getNode(),
+					`Statut de la tâche ${taskId} indisponible après ${MAX_CONSECUTIVE_POLL_FAILURES} tentatives consécutives (erreurs transitoires répétées).`,
+					{
+						itemIndex,
+						description: `Dernier code HTTP : ${httpStatusFromError(error) ?? 'réseau/timeout'}.`,
+					},
+				);
+			}
+		}
 	}
 
 	if (current.status === STATUS_FAILURE) {

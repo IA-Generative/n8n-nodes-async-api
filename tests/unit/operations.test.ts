@@ -39,7 +39,11 @@ function createExecFns({ params, responses = [], throwError }: FakeExecOpts) {
 			) {
 				requests.push({ method: opts.method, url: opts.url, body: opts.body });
 				if (throwError) throw throwError;
-				return responses[call++];
+				const next = responses[call++];
+				// Une entrée `Error` dans `responses` simule un échec sur CET appel précis
+				// (utile pour tester la résilience du polling à un 5xx transitoire).
+				if (next instanceof Error) throw next;
+				return next;
 			},
 		},
 		__requests: requests,
@@ -141,6 +145,39 @@ test('submitAndWait times out with a "still running" message', async () => {
 	});
 
 	await assert.rejects(submitAndWait(fns, 0), /toujours en cours|délai dépassé/);
+});
+
+test('submitAndWait retente le poll sur un 500 transitoire et renvoie le succès', async () => {
+	const transient500 = Object.assign(new Error('Internal Server Error'), { httpCode: '500' });
+	const fns = createExecFns({
+		params: { service: 'extract-text', body: {}, waitOptions: { pollIntervalSeconds: 0.01 } },
+		responses: [
+			{ status: 'success', data: { task_id: 't1', status: 'pending' } }, // submit
+			transient500, // poll 1 : 5xx transitoire (worker retry LLM en cours)
+			{ status: 'success', data: { task_id: 't1', status: 'success', result: { ok: 1 } } }, // poll 2
+		],
+	});
+
+	const data = await submitAndWait(fns, 0);
+
+	assert.equal(data.status, 'success');
+	assert.deepEqual(data.result, { ok: 1 });
+});
+
+test('submitAndWait échoue immédiatement sur une erreur définitive (404) pendant le poll', async () => {
+	const notFound = Object.assign(new Error('Not Found'), {
+		httpCode: '404',
+		response: { body: { status: 'error', error: { code: 'TASK_NOT_FOUND', message: 'x' } } },
+	});
+	const fns = createExecFns({
+		params: { service: 'extract-text', body: {}, waitOptions: { pollIntervalSeconds: 0.01 } },
+		responses: [
+			{ status: 'success', data: { task_id: 't1', status: 'pending' } }, // submit
+			notFound, // poll 1 : 404 définitif → pas de retry
+		],
+	});
+
+	await assert.rejects(submitAndWait(fns, 0), /introuvable/i);
 });
 
 test('API errors are remapped to a readable message (SERVICE_FORBIDDEN)', async () => {
